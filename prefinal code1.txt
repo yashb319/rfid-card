@@ -1,0 +1,223 @@
+#include<LiquidCrystal.h>
+#include<Keypad.h>
+#include <SPI.h>
+#include <MFRC522.h>
+
+//================================================================================================================
+#define SS_PIN 53
+#define RST_PIN 5
+
+//================================================================================================================
+const byte rows=4;
+const byte cols=4;
+char keyMap [rows] [cols]={
+  {'1','2','3','A'},
+  {'4','5','6','B'},
+  {'7','8','9','C'},
+  {'*','0','#','D'}
+};
+byte rowPins[rows]={6,7,8,9};
+byte colPins[cols]={10,11,12,13};
+
+Keypad myKeypad = Keypad(makeKeymap(keyMap),rowPins,colPins,rows,cols);                                  
+
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+MFRC522::MIFARE_Key key;//create a MIFARE_Key struct named 'key', which will hold the card information
+  
+
+LiquidCrystal lcd(A8 ,A9 ,A10 ,A11 ,A12 ,A13);
+
+//==================================================================================================================
+void setup()
+{
+  lcd.begin(16,2);
+  Serial.begin(9600);   // Initiate a serial communication
+  SPI.begin();          // Initiate  SPI bus
+  mfrc522.PCD_Init();   // Initiate MFRC522
+  for (byte i = 0; i < 6; i++) {
+    key.keyByte[i] = 0xFF;      //keyByte is defined in the "MIFARE_Key" 'struct' definition in the .h file of the library
+  }
+}
+//==============================================================================
+
+int block=2;                                 //this is the block number we will write into and then read. Do not write into 'sector trailer' block, since this can make the block unusable.
+byte blockcontent[16] = {""};               //an array with 16 bytes to be written into one of the 64 card blocks is defined
+                                            //byte blockcontent[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};//all zeros. This can be used to delete a block.
+byte readbackblock[18];                     //This array is used for reading out a block. The MIFARE_Read method requires a buffer that is at least 18 bytes to hold the 16 bytes of a block.
+
+//==================================================================================================================
+
+void loop()
+{
+  if ( ! mfrc522.PICC_IsNewCardPresent())     // Look for new cards
+  {
+    return;
+  }
+  
+  if ( ! mfrc522.PICC_ReadCardSerial())       // Select one of the cards
+  {
+    return;
+  }
+  
+  Serial.print("UID tag :");                  //Show UID on serial monitor
+  String content= "";
+  byte letter;
+  for (byte i = 0; i < mfrc522.uid.size; i++) {
+    Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
+    Serial.print(mfrc522.uid.uidByte[i], HEX);
+    content.concat(String(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " "));
+    content.concat(String(mfrc522.uid.uidByte[i], HEX));
+    }
+  Serial.println();
+  Serial.print("Message : ");
+  content.toUpperCase();
+  if (content.substring(1) == "83 AB 25 1D")                //change here the UID of the card/cards that you want to give access
+  {
+    int balance=0;
+    Serial.println("Authorized access");
+    Serial.println();
+    //--------------------------------------------------------------------------
+    readBlock(block, readbackblock);//read the block back
+    for (int j=0 ; j<16 ; j++)//print the block contents
+         {
+           balance=balance*10+(readbackblock[j]);//Serial.write() transmits the ASCII numbers as human readable characters to serial monitor
+         }
+    //---------------------------------------------------------------------------
+    int i=0,sum=0,newdigit=0;
+    Serial.println(balance);
+    if(balance>10){
+    lcd.setCursor(0, 0);
+    lcd.clear();
+    lcd.print("Welcome ");
+                      //int i=0,sum=0,newdigit=0;
+    while(i>=0){
+    char presskey = myKeypad.getKey();
+    if(presskey == '1' || presskey == '2' || presskey == '3' || presskey == '4' || presskey == '5' || presskey == '6' || presskey == '7' || presskey == '8' || presskey == '9' || presskey == '0'){
+      lcd.setCursor(i,1);
+      lcd.print(presskey);
+      i++;
+      newdigit=int(presskey);
+      newdigit=newdigit-48;                                   //key char to int
+      sum=sum*10+newdigit;
+    }
+    if(presskey == 'C'){
+      i=i-1;
+      lcd.setCursor(i,1);
+      lcd.print(" ");
+      sum=sum/10;
+    }
+    if(presskey == '*'){
+      break;
+    }
+  }
+  }
+  else{
+    lcd.print("Balance Low");
+  }
+  lcd.clear();
+  lcd.print("Exit ");
+  lcd.setCursor(0,1);
+  //---------------------------------------------------------------------------------------------
+  balance=balance-sum;
+  lcd.print(balance);
+  int temp=0;
+  Serial.println(balance);
+  for (int j=16 ; j>=0 ; j--)            //print the block contents
+         {
+          temp=balance%10;
+          balance=balance/10;
+          blockcontent[j]=temp;         //Serial.write() transmits the ASCII numbers as human readable characters to serial monitor
+         }
+   writeBlock(block, blockcontent);     //the blockcontent array is written into the card block
+  }
+//------------------------------------------------------------------------------------
+ else{
+  lcd.clear();
+  Serial.println(" Access denied");
+  lcd.setCursor(0,0);
+  lcd.print("use right card  ");
+  delay(3000);
+  }
+}
+
+
+
+
+//==============================================================================================================================================================================================
+
+int writeBlock(int blockNumber, byte arrayAddress[]) 
+{
+  //this makes sure that we only write into data blocks. Every 4th block is a trailer block for the access/security info.
+  int largestModulo4Number=blockNumber/4*4;
+  int trailerBlock=largestModulo4Number+3;//determine trailer block for the sector
+  if (blockNumber > 2 && (blockNumber+1)%4 == 0){
+    Serial.print(blockNumber);
+    Serial.println(" is a trailer block:");
+    return 2;
+    }                                                             //block number is a trailer block (modulo 4); quit and send error code 2
+    
+    Serial.print(blockNumber);
+    Serial.println(" is a data block:");
+  /*****************************************authentication of the desired block for access***********************************************************/
+  byte status = mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, trailerBlock, &key, &(mfrc522.uid));
+  //byte PCD_Authenticate(byte command, byte blockAddr, MIFARE_Key *key, Uid *uid);
+  //this method is used to authenticate a certain block for writing or reading
+  //command: See enumerations above -> PICC_CMD_MF_AUTH_KEY_A  = 0x60 (=1100000),    // this command performs authentication with Key A
+  //blockAddr is the number of the block from 0 to 15.
+  //MIFARE_Key *key is a pointer to the MIFARE_Key struct defined above, this struct needs to be defined for each block. New cards have all A/B= FF FF FF FF FF FF
+  //Uid *uid is a pointer to the UID struct that contains the user ID of the card.
+  if (status != MFRC522::STATUS_OK) {
+         Serial.print("PCD_Authenticate() failed: ");
+         Serial.println(mfrc522.GetStatusCodeName(status));
+         return 3;                                            //return "3" as error message
+  }
+  //it appears the authentication needs to be made before every block read/write within a specific sector.
+  //If a different sector is being authenticated access to the previous one is lost.
+
+
+  /*****************************************writing the block***********************************************************/
+        
+  status = mfrc522.MIFARE_Write(blockNumber, arrayAddress, 16);//valueBlockA is the block number, MIFARE_Write(block number (0-15), byte array containing 16 values, number of bytes in block (=16))
+  //status = mfrc522.MIFARE_Write(9, value1Block, 16);
+  if (status != MFRC522::STATUS_OK) {
+           Serial.print("MIFARE_Write() failed: ");
+           Serial.println(mfrc522.GetStatusCodeName(status));
+           return 4;//return "4" as error message
+  }
+  Serial.println("block was written");
+}
+
+
+int readBlock(int blockNumber, byte arrayAddress[]) 
+{
+  int largestModulo4Number=blockNumber/4*4;
+  int trailerBlock=largestModulo4Number+3;//determine trailer block for the sector
+
+  /*****************************************authentication of the desired block for access***********************************************************/
+  byte status = mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, trailerBlock, &key, &(mfrc522.uid));
+  //byte PCD_Authenticate(byte command, byte blockAddr, MIFARE_Key *key, Uid *uid);
+  //this method is used to authenticate a certain block for writing or reading
+  //command: See enumerations above -> PICC_CMD_MF_AUTH_KEY_A = 0x60 (=1100000),    // this command performs authentication with Key A
+  //blockAddr is the number of the block from 0 to 15.
+  //MIFARE_Key *key is a pointer to the MIFARE_Key struct defined above, this struct needs to be defined for each block. New cards have all A/B= FF FF FF FF FF FF
+  //Uid *uid is a pointer to the UID struct that contains the user ID of the card.
+  if (status != MFRC522::STATUS_OK) {
+         Serial.print("PCD_Authenticate() failed (read): ");
+         Serial.println(mfrc522.GetStatusCodeName(status));
+         return 3;//return "3" as error message
+  }
+  //it appears the authentication needs to be made before every block read/write within a specific sector.
+  //If a different sector is being authenticated access to the previous one is lost.
+
+
+  /*****************************************reading a block***********************************************************/
+        
+  byte buffersize = 18;//we need to define a variable with the read buffer size, since the MIFARE_Read method below needs a pointer to the variable that contains the size... 
+  status = mfrc522.MIFARE_Read(blockNumber, arrayAddress, &buffersize);//&buffersize is a pointer to the buffersize variable; MIFARE_Read requires a pointer instead of just a number
+  if (status != MFRC522::STATUS_OK) {
+          Serial.print("MIFARE_read() failed: ");
+          Serial.println(mfrc522.GetStatusCodeName(status));
+          return 4;//return "4" as error message
+  }
+  Serial.println("block was read new one");
+}
